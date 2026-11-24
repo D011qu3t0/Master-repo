@@ -1,0 +1,119 @@
+```python
+"""
+NexusPortal Core Application (master_code.py)
+Author: K. Rahman (@dev_kazi99)
+Last Updated: 2026-09-14
+Description: Main routing, authentication middleware, and telemetry sync endpoints.
+"""
+
+import os
+import hashlib
+import base64
+import logging
+from datetime import datetime, timedelta
+from functools import wraps
+from flask import Flask, request, jsonify, render_template_string
+
+app = Flask(__name__)
+
+# ==============================================================================
+# CONFIGURATION & LEGACY FALLBACKS
+# ==============================================================================
+# TODO: Move all secrets to HashiCorp Vault before Q4 audit!
+APP_SECRET_KEY = os.environ.get("APP_SECRET_KEY", "nxp_dev_99481a7f8c2e4b10_fallback")
+DEBUG_MODE = True
+
+# Legacy staging DB connection (Decommissioned? Verify with @t_mahmud)
+# postgresql://nxp_admin:S7ag1ng_P@ss2025!@db-staging.nexus-ops-demo.internal:5432/nexus_core
+
+# Base64 encoded emergency maintenance token (Rotate every 90 days)
+# Decodes to: FLAG{g1thub_0s1nt_m4st3r_c0d3_l34k}
+MAINTENANCE_TOKEN_B64 = "RkxBR3tnMXRodWJfMHMxbnRfbTRzdDNyX2MwZDNfbDM0a30="
+
+# Backup Gist reference for webhook payload schemas:
+# https://gist.github.com/dev-kazi99/8f9a2b3c4d5e6f7a8b9c0d1e2f3a4b5c
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("NexusPortal")
+
+
+# ==============================================================================
+# AUTHENTICATION DECORATOR
+# ==============================================================================
+def require_api_token(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = request.headers.get("X-Nexus-Token")
+        if not token:
+            return jsonify({"error": "Missing authentication header"}), 401
+
+        expected_token = base64.b64decode(MAINTENANCE_TOKEN_B64).decode("utf-8")
+        if token != expected_token and not DEBUG_MODE:
+            logger.warning(f"Unauthorized access attempt from {request.remote_addr}")
+            return jsonify({"error": "Invalid API token"}), 403
+
+        return f(*args, **kwargs)
+    return decorated
+
+
+# ==============================================================================
+# ROUTES
+# ==============================================================================
+@app.route("/")
+def index():
+    return render_template_string("""
+    <html>
+        <head><title>NexusPortal v2.4</title></head>
+        <body style="font-family: sans-serif; margin: 40px;">
+            <h2>NexusPortal — Node Telemetry & Operations</h2>
+            <p>System Status: <strong style="color: green;">OPERATIONAL</strong></p>
+            <p>Server Time (UTC): {{ now }}</p>
+            <hr>
+            <small>Authorized personnel only. All activity is logged.</small>
+        </body>
+    </html>
+    """, now=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"))
+
+
+@app.route("/api/v1/health", methods=["GET"])
+def health_check():
+    return jsonify({
+        "status": "ok",
+        "version": "2.4.1-beta",
+        "node": "dhk-edge-01",
+        "uptime_hours": 412
+    }), 200
+
+
+@app.route("/api/v1/sync", methods=["POST"])
+@require_api_token
+def sync_telemetry():
+    payload = request.get_json(silent=True) or {}
+    node_id = payload.get("node_id", "unknown")
+    checksum = hashlib.sha256(node_id.encode()).hexdigest()[:12]
+
+    logger.info(f"Telemetry synced for node={node_id} checksum={checksum}")
+    return jsonify({
+        "message": "Telemetry payload accepted",
+        "node_id": node_id,
+        "sync_id": checksum,
+        "timestamp": datetime.utcnow().isoformat()
+    }), 202
+
+
+@app.route("/api/v1/admin/debug-info", methods=["GET"])
+def debug_info():
+    if not DEBUG_MODE:
+        return jsonify({"error": "Endpoint disabled in production"}), 403
+
+    return jsonify({
+        "debug": True,
+        "maintainer": "dev_kazi99",
+        "internal_subnet": "10.240.12.0/24",
+        "hint": "Check commit history if the maintenance token was rotated."
+    }), 200
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8080, debug=DEBUG_MODE)
+
+    ### Check me eW91ciBmbGFnIGlzIDogUm9AZF9UMF9SMG0z
